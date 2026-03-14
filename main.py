@@ -32,13 +32,35 @@ def get_stock_info(ticker: str):
 
 @app.get("/history/{ticker}")
 def get_history(ticker: str, period: str = Query("1y"), interval: str = Query("1d")):
+    # === VALIDATION (keep this from my previous suggestion) ===
+    valid_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+    valid_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    if period not in valid_periods:
+        return {"error": f"Invalid period '{period}'. Valid: {sorted(valid_periods)}"}
+    if interval not in valid_intervals:
+        return {"error": f"Invalid interval '{interval}'. Valid: {sorted(valid_intervals)}"}
+
     ticker = normalize_indian(ticker)
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return {"error": "No data found"}
+        
+        # 🔥 THIS IS THE FIX FOR yfinance 2.x MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1)   # Drops the ticker level → columns become normal strings
+
+        if df.empty:
+            return {"error": "No data found"}
+
         df = df.reset_index()
+        
+        # Handle both 'Date' (daily) and 'Datetime' (intraday) for better graphs
+        if "Datetime" in df.columns:
+            df = df.rename(columns={"Datetime": "Date"})
+        
         df['Date'] = df['Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        
         return df.to_dict(orient="records")
+    
     except Exception as e:
         return {"error": str(e)}
 
