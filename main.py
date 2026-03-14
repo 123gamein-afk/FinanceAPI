@@ -4,11 +4,14 @@ import asyncio
 from datetime import datetime
 import random
 import pandas as pd
+from fastapi.middleware.cors import CORSMiddleware  # Add this import
 
 app = FastAPI(
     title="Indian Stock API - Real + Simulation (Full Version)",
     description="REST + Real Native WebSocket + Indian Market Simulation 24/7"
 )
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "https://your-frontend-domain.com"],  # Add your frontend URLs
