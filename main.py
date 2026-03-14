@@ -1,166 +1,85 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-import yfinance as yf
-import asyncio
-from datetime import datetime
-import pandas as pd
 
-app = FastAPI(
-    title="Indian + Foreign Stock yfinance API (Native Real-Time + Multi-Symbol)",
-    description="True instantaneous live streaming"
-)
-
-
-# ==================== HELPERS ====================
-
-def normalize_indian(t: str) -> str:
-    t = t.upper().strip()
-    if not t.endswith(('.NS', '.BO')) and not t.startswith('^'):
-        t += '.NS'
-    return t
-
-
-def normalize_foreign(t: str) -> str:
-    return t.upper().strip()
-
-
-# ==================== REST ENDPOINTS (unchanged) ====================
-
-@app.get("/info/{ticker}")
-def get_stock_info(ticker: str):
+@app.websocket("/ws/sim/{ticker}")
+async def websocket_sim_single(websocket: WebSocket, ticker: str):
+    await websocket.accept()
     ticker = normalize_indian(ticker)
+    print(f"🧪 SIMULATION STARTED: {ticker}")
+
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        return {**info, "symbol": ticker}
+        # Start from real last price
+        fi = yf.Ticker(ticker).fast_info
+        current_price = round(fi.get("lastPrice") or fi.get("previousClose") or 1000, 2)
+        prev_close = round(fi.get("previousClose") or current_price, 2)
+        volume = random.randint(800000, 5000000)
+
+        while True:
+            # Random walk simulation
+            change = random.uniform(-4.0, 4.0)
+            if random.random() < 0.12:          # occasional bigger swing
+                change = random.uniform(-18.0, 18.0)
+            
+            current_price = max(5.0, round(current_price + change, 2))
+            change_percent = round(((current_price - prev_close) / prev_close) * 100, 2)
+            volume = int(volume * random.uniform(0.93, 1.07))
+
+            payload = {
+                "symbol": ticker,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "lastPrice": current_price,
+                "previousClose": prev_close,
+                "changePercent": change_percent,
+                "volume": volume,
+                "mode": "SIMULATION"
+            }
+            await websocket.send_json(payload)
+            await asyncio.sleep(1.1)               # feels very live
+    except WebSocketDisconnect:
+        print(f"Simulation disconnected: {ticker}")
     except Exception as e:
-        return {"error": str(e)}
+        print("Sim error:", e)
 
-
-@app.get("/history/{ticker}")
-def get_history(ticker: str, period: str = Query("1y"), interval: str = Query("1d")):
-    ticker = normalize_indian(ticker)
-    try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return {"error": "No data found"}
-        df = df.reset_index()
-        df['Date'] = df['Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        return df.to_dict(orient="records")
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/foreign/info/{ticker}")
-def get_foreign_info(ticker: str):
-    ticker = normalize_foreign(ticker)
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        return {**info, "symbol": ticker}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/foreign/history/{ticker}")
-def get_foreign_history(ticker: str, period: str = Query("1y"), interval: str = Query("1d")):
-    ticker = normalize_foreign(ticker)
-    try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return {"error": "No data found"}
-        df = df.reset_index()
-        df['Date'] = df['Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        return df.to_dict(orient="records")
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ==================== MULTI-SYMBOL FIRST (MUST BE BEFORE /ws/{ticker}) ====================
-
-@app.websocket("/ws/multi")
-async def websocket_multi(
-        websocket: WebSocket,
-        symbols: str = Query(..., description="Comma-separated: BTC-USD,ETH-USD,SOL-USD,RELIANCE.NS")
+@app.websocket("/ws/sim/multi")
+async def websocket_sim_multi(
+    websocket: WebSocket,
+    symbols: str = Query(..., description="Comma separated: RELIANCE,TCS,HDFCBANK")
 ):
     await websocket.accept()
-    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    tickers = [normalize_indian(s.strip()) for s in symbols.split(",") if s.strip()]
+    print(f"🧪 MULTI SIMULATION STARTED: {tickers}")
 
-    print(f"✅ Multi-WS subscribed to: {tickers}")  # debug in terminal
-
-    previous_closes = {}
+    # Initialize each stock
+    prices = {}
+    prev_closes = {}
+    volumes = {}
     for t in tickers:
-        try:
-            previous_closes[t] = round(yf.Ticker(t).fast_info.get("previousClose") or 0, 2)
-        except:
-            previous_closes[t] = 0.0
+        fi = yf.Ticker(t).fast_info
+        prices[t] = round(fi.get("lastPrice") or fi.get("previousClose") or 1000, 2)
+        prev_closes[t] = round(fi.get("previousClose") or prices[t], 2)
+        volumes[t] = random.randint(800000, 5000000)
 
     try:
-        async with yf.AsyncWebSocket(verbose=True) as ws:  # verbose=True for debug
-            await ws.subscribe(tickers)
-            print(f"✅ Subscribed successfully to {tickers}")
+        while True:
+            for t in tickers:
+                change = random.uniform(-4.0, 4.0)
+                if random.random() < 0.1:
+                    change = random.uniform(-18.0, 18.0)
+                
+                prices[t] = max(5.0, round(prices[t] + change, 2))
+                chg_pct = round(((prices[t] - prev_closes[t]) / prev_closes[t]) * 100, 2)
+                volumes[t] = int(volumes[t] * random.uniform(0.93, 1.07))
 
-            def message_handler(msg: dict):
-                try:
-                    sym = msg.get("id") or msg.get("symbol") or list(previous_closes.keys())[0]
-                    payload = {
-                        "symbol": sym,
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
-                        "lastPrice": round(msg.get("price") or 0, 2),
-                        "previousClose": previous_closes.get(sym, 0),
-                        "changePercent": round(msg.get("change_percent") or 0, 2),
-                        "volume": msg.get("volume") or msg.get("day_volume") or 0
-                    }
-                    asyncio.create_task(websocket.send_json(payload))
-                except Exception as e:
-                    print("Handler error:", e)
-
-            await ws.listen(message_handler)
-
+                payload = {
+                    "symbol": t,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "lastPrice": prices[t],
+                    "previousClose": prev_closes[t],
+                    "changePercent": chg_pct,
+                    "volume": volumes[t],
+                    "mode": "SIMULATION"
+                }
+                await websocket.send_json(payload)
+            await asyncio.sleep(1.3)
     except WebSocketDisconnect:
-        print(f"Client disconnected (multi): {tickers}")
+        print("Multi simulation disconnected")
     except Exception as e:
-        print("Multi WS error:", e)
-        try:
-            await websocket.send_json({"error": str(e)})
-        except:
-            pass
-
-
-# ==================== SINGLE TICKER WEBSOCKETS (AFTER multi) ====================
-
-@app.websocket("/ws/{ticker}")
-async def websocket_indian(websocket: WebSocket, ticker: str):
-    await websocket.accept()
-    ticker = normalize_indian(ticker)
-    # (same code as before - unchanged for simplicity)
-    try:
-        previous_close = round(yf.Ticker(ticker).fast_info.get("previousClose") or 0, 2)
-        async with yf.AsyncWebSocket(verbose=True) as ws:
-            await ws.subscribe(ticker)
-
-            def handler(msg):
-                payload = {...}  # same as before
-                asyncio.create_task(websocket.send_json(payload))
-
-            await ws.listen(handler)
-    except Exception as e:
-        print("Indian WS error:", e)
-
-
-@app.websocket("/ws/foreign/{ticker}")
-async def websocket_foreign(websocket: WebSocket, ticker: str):
-    await websocket.accept()
-    ticker = normalize_foreign(ticker)
-    # (same code as before)
-    try:
-        previous_close = round(yf.Ticker(ticker).fast_info.get("previousClose") or 0, 2)
-        async with yf.AsyncWebSocket(verbose=True) as ws:
-            await ws.subscribe(ticker)
-
-            def handler(msg):
-                payload = {...}  # same
-                asyncio.create_task(websocket.send_json(payload))
-
-            await ws.listen(handler)
-    except Exception as e:
-        print("Foreign WS error:", e)
-
-# Run: uvicorn main:app --reload
+        print("Multi sim error:", e)
