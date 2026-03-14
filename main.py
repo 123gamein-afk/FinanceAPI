@@ -31,34 +31,58 @@ def get_stock_info(ticker: str):
         return {"error": str(e)}
 
 @app.get("/history/{ticker}")
-def get_history(ticker: str, period: str = Query("1y"), interval: str = Query("1d")):
-    # === VALIDATION (keep this from my previous suggestion) ===
+def get_history(
+    ticker: str,
+    period: str = Query("1y", description="Valid: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max"),
+    interval: str = Query("1d", description="Valid: 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo")
+):
+    """Fixed for yfinance 2.x + full validation + graph-ready data"""
+    
+    # === FULL VALIDATION (blocks bad combos early) ===
     valid_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
     valid_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    
     if period not in valid_periods:
         return {"error": f"Invalid period '{period}'. Valid: {sorted(valid_periods)}"}
     if interval not in valid_intervals:
         return {"error": f"Invalid interval '{interval}'. Valid: {sorted(valid_intervals)}"}
+    
+    # Combo rules (prevents empty data)
+    intraday = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
+    if interval in intraday:
+        if period not in {"1d", "5d", "1mo"}:
+            return {"error": f"Intraday interval '{interval}' only works with period=1d, 5d or 1mo"}
+        if interval == "1m" and period not in {"1d", "5d"}:
+            return {"error": "1m interval ONLY supports period=1d or 5d"}
 
     ticker = normalize_indian(ticker)
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+            prepost=True
+        )
         
-        # 🔥 THIS IS THE FIX FOR yfinance 2.x MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df.droplevel(1, axis=1)   # Drops the ticker level → columns become normal strings
-
         if df.empty:
-            return {"error": "No data found"}
+            return {"error": "No data found for this ticker/period/interval combo"}
+
+        # 🔥 yfinance 2.x MULTIINDEX FIX
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1)   # removes ticker name from columns
 
         df = df.reset_index()
-        
-        # Handle both 'Date' (daily) and 'Datetime' (intraday) for better graphs
+
+        # Handle both 'Date' (daily) and 'Datetime' (intraday)
         if "Datetime" in df.columns:
             df = df.rename(columns={"Datetime": "Date"})
-        
+        elif "Date" not in df.columns:
+            df["Date"] = pd.to_datetime(df.index)
+
         df['Date'] = df['Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        
+
         return df.to_dict(orient="records")
     
     except Exception as e:
@@ -74,14 +98,57 @@ def get_foreign_info(ticker: str):
         return {"error": str(e)}
 
 @app.get("/foreign/history/{ticker}")
-def get_foreign_history(ticker: str, period: str = Query("1y"), interval: str = Query("1d")):
+def get_foreign_history(
+    ticker: str,
+    period: str = Query("1y", description="Valid: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max"),
+    interval: str = Query("1d", description="Valid: 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo")
+):
+    """Same as above but for foreign tickers (AAPL, TSLA, etc.)"""
+    
+    # === SAME VALIDATION (copy-pasted for consistency) ===
+    valid_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+    valid_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    
+    if period not in valid_periods:
+        return {"error": f"Invalid period '{period}'. Valid: {sorted(valid_periods)}"}
+    if interval not in valid_intervals:
+        return {"error": f"Invalid interval '{interval}'. Valid: {sorted(valid_intervals)}"}
+    
+    intraday = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
+    if interval in intraday:
+        if period not in {"1d", "5d", "1mo"}:
+            return {"error": f"Intraday interval '{interval}' only works with period=1d, 5d or 1mo"}
+        if interval == "1m" and period not in {"1d", "5d"}:
+            return {"error": "1m interval ONLY supports period=1d or 5d"}
+
     ticker = normalize_foreign(ticker)
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return {"error": "No data found"}
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+            prepost=True
+        )
+        
+        if df.empty:
+            return {"error": "No data found for this ticker/period/interval combo"}
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1)
+
         df = df.reset_index()
+
+        if "Datetime" in df.columns:
+            df = df.rename(columns={"Datetime": "Date"})
+        elif "Date" not in df.columns:
+            df["Date"] = pd.to_datetime(df.index)
+
         df['Date'] = df['Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
         return df.to_dict(orient="records")
+    
     except Exception as e:
         return {"error": str(e)}
 
@@ -240,6 +307,27 @@ async def websocket_sim_multi(
         print(f"Simulation disconnected: {tickers}")
     except Exception as e:
         print("Sim error:", e)
+
+
+@app.get("/graph/{ticker}")
+def get_graph_data(
+    ticker: str,
+    period: str = Query("1mo"),
+    interval: str = Query("1d")
+):
+    """Perfect JSON for any charting library (Chart.js, Recharts, Plotly, TradingView, etc.)"""
+    data = get_history(ticker, period, interval)   # reuses the fixed function
+    
+    if isinstance(data, dict) and "error" in data:
+        return data
+    
+    return {
+        "symbol": ticker.upper(),
+        "period": period,
+        "interval": interval,
+        "last_updated": datetime.utcnow().isoformat() + "Z",
+        "candles": data
+    }
 
 # ==================== RUN ====================
 # uvicorn main:app --reload --port 8000
