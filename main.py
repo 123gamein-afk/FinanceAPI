@@ -9,6 +9,13 @@ app = FastAPI(
     title="Indian Stock API - Real + Simulation (Full Version)",
     description="REST + Real Native WebSocket + Indian Market Simulation 24/7"
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "https://your-frontend-domain.com"],  # Add your frontend URLs
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ==================== HELPERS ====================
 def normalize_indian(t: str) -> str:
